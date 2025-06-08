@@ -14,146 +14,34 @@ from functools import reduce
 from collections import defaultdict
 import json
 import plotly.express as px
-import pickle
-import hashlib
-from pathlib import Path
+from concurrent.futures import ProcessPoolExecutor
+import time
 
-# Configuración de cache para Streamlit
-st.set_page_config(page_title="Semantic Search Engine", layout="wide")
+# Descarga de recursos NLTK
+nltk.download('stopwords')
 
-# Descarga de recursos NLTK (solo una vez)
-@st.cache_resource
-def download_nltk_resources():
-    nltk.download('stopwords', quiet=True)
-    return True
+# Download NLTK stopwords if not present
+download('stopwords')
+spanish_stopwords = set(stopwords.words('spanish'))
+english_stopwords = set(stopwords.words('english'))
+stopwords_set = spanish_stopwords | english_stopwords
 
-# Cargar modelo de spaCy (solo una vez)
-@st.cache_resource
-def load_spacy_model():
-    try:
-        return spacy.load("en_core_web_sm")
-    except OSError:
-        st.error("Please install the spaCy model by running: python -m spacy download en_core_web_sm")
-        st.stop()
+# Load spaCy model for NER
+try:
+    nlp = spacy.load("en_core_web_sm")
+except OSError:
+    st.error("Please install the spaCy model by running: python -m spacy download en_core_web_sm")
+    st.stop()
 
-# Configurar stopwords (solo una vez)
-@st.cache_resource
-def setup_stopwords():
-    download_nltk_resources()
-    spanish_stopwords = set(stopwords.words('spanish'))
-    english_stopwords = set(stopwords.words('english'))
-    return spanish_stopwords | english_stopwords
-
-# Inicializar recursos
-nlp = load_spacy_model()
-stopwords_set = setup_stopwords()
-
-# Función para generar hash del archivo
-def get_file_hash(file_content):
-    return hashlib.md5(file_content).hexdigest()
-
-# Cache para datos procesados
+# Step 1: Dataset loading (Cached)
 @st.cache_data
-def load_and_process_csv_data(file_content, file_hash):
-    """Carga y procesa completamente el CSV con cache basado en hash del archivo"""
-    
-    # Crear DataFrame desde el contenido del archivo
-    from io import StringIO
-    df = pd.read_csv(StringIO(file_content.decode('utf-8')))
+def load_csv_data(_file):
+    """Load and preprocess CSV data"""
+    df = pd.read_csv(_file)
     df['text_content'] = df['reviews.text'].fillna('') + ' ' + df['reviews.title'].fillna('')
-    
-    # Limitar el dataset para pruebas (opcional)
-    # df = df.head(1000)  # Procesar solo las primeras 1000 filas para testing
-    
-    raw_docs = df['text_content'].tolist()
-    doc_names = [f"Review_{i+1}" for i in range(len(raw_docs))]
-    
-    # Procesar todos los pasos de una vez
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-    
-    # Step 2: Cleaning and Regex
-    status_text.text("Procesando: Limpieza de texto y extracción regex...")
-    cleaned_docs = []
-    prices_list = []
-    models_list = []
-    
-    for i, doc in enumerate(raw_docs):
-        cleaned, prices, models = clean_text(doc)
-        cleaned_docs.append(cleaned)
-        prices_list.append(prices)
-        models_list.append(models)
-        
-        if i % 100 == 0:  # Actualizar progreso cada 100 documentos
-            progress_bar.progress((i + 1) / len(raw_docs) * 0.2)
-    
-    tokenized_docs = [clean_words(doc) for doc in cleaned_docs]
-    progress_bar.progress(0.2)
-    
-    # Step 3: NER (optimizado por lotes)
-    status_text.text("Procesando: Reconocimiento de entidades nombradas...")
-    entities_list = []
-    batch_size = 50  # Procesar en lotes para optimizar spaCy
-    
-    for i in range(0, len(raw_docs), batch_size):
-        batch = raw_docs[i:i+batch_size]
-        batch_entities = [extract_entities(doc) for doc in batch]
-        entities_list.extend(batch_entities)
-        progress_bar.progress(0.2 + (i / len(raw_docs)) * 0.2)
-    
-    # Step 4: Event Extraction
-    status_text.text("Procesando: Extracción de eventos...")
-    events_list = []
-    for i, doc in enumerate(raw_docs):
-        events_list.append(extract_events(doc))
-        if i % 100 == 0:
-            progress_bar.progress(0.4 + (i / len(raw_docs)) * 0.2)
-    
-    # Step 5: Relation Extraction
-    status_text.text("Procesando: Extracción de relaciones...")
-    relations_list = []
-    for i, (doc, entities) in enumerate(zip(raw_docs, entities_list)):
-        relations_list.append(extract_relations(doc, entities))
-        if i % 100 == 0:
-            progress_bar.progress(0.6 + (i / len(raw_docs)) * 0.2)
-    
-    # Step 6: Emotion Extraction
-    status_text.text("Procesando: Extracción de emociones...")
-    emotions_list = []
-    for i, (row, doc) in enumerate(zip(df.iterrows(), raw_docs)):
-        emotions_list.append(extract_emotions(doc, row[1]['reviews.rating']))
-        if i % 100 == 0:
-            progress_bar.progress(0.8 + (i / len(raw_docs)) * 0.1)
-    
-    # Step 7: RDF Creation
-    status_text.text("Procesando: Creación de grafo RDF...")
-    rdf_graph = create_rdf_triplets(df, entities_list, events_list, relations_list, emotions_list)
-    progress_bar.progress(0.95)
-    
-    # Preparar BM25
-    status_text.text("Finalizando: Preparando índice de búsqueda...")
-    vocab = sorted(set(reduce(lambda x, y: x + y, tokenized_docs, [])))
-    progress_bar.progress(1.0)
-    
-    status_text.text("¡Procesamiento completado!")
-    
-    return {
-        'df': df,
-        'raw_docs': raw_docs,
-        'doc_names': doc_names,
-        'cleaned_docs': cleaned_docs,
-        'tokenized_docs': tokenized_docs,
-        'prices_list': prices_list,
-        'models_list': models_list,
-        'entities_list': entities_list,
-        'events_list': events_list,
-        'relations_list': relations_list,
-        'emotions_list': emotions_list,
-        'rdf_graph': rdf_graph,
-        'vocab': vocab
-    }
+    return df
 
-# Funciones optimizadas para procesamiento
+# Step 2: Cleaning + Regex (Parallelized)
 def clean_text(text):
     """Clean and normalize text, extract prices and models with regex"""
     if not isinstance(text, str):
@@ -173,106 +61,114 @@ def clean_text(text):
     
     return ' '.join(cleaned_tokens), prices, models
 
-def extract_entities(text):
-    """Extract entities using spaCy"""
-    if len(text) > 1000000:  # Limitar texto muy largo
-        text = text[:1000000]
-        
-    doc = nlp(text)
-    entities = {
-        'PRODUCT': [],
-        'BRAND': [],
-        'LOCATION': [],
-        'PERSON': []
-    }
-    for ent in doc.ents:
-        if ent.label_ == 'PRODUCT':
-            entities['PRODUCT'].append(ent.text)
-        elif ent.label_ == 'ORG':
-            entities['BRAND'].append(ent.text)
-        elif ent.label_ == 'GPE':
-            entities['LOCATION'].append(ent.text)
-        elif ent.label_ == 'PERSON':
-            entities['PERSON'].append(ent.text)
-    return entities
+@st.cache_data
+def parallel_clean_texts(_texts):
+    """Parallelize text cleaning"""
+    with ProcessPoolExecutor() as executor:
+        results = list(executor.map(clean_text, _texts))
+    return results
 
-def extract_events(text):
-    """Extract events based on key verbs"""
-    if len(text) > 1000000:  # Limitar texto muy largo
-        text = text[:1000000]
-        
+# Step 3: Named Entity Recognition (NER) (Batched)
+@st.cache_data
+def extract_entities_batch(_texts):
+    """Extract entities using spaCy in batch"""
+    entities_list = []
+    for doc in nlp.pipe(_texts, disable=["parser", "lemmatizer"]):
+        entities = {'PRODUCT': [], 'BRAND': [], 'LOCATION': [], 'PERSON': []}
+        for ent in doc.ents:
+            if ent.label_ == 'PRODUCT':
+                entities['PRODUCT'].append(ent.text)
+            elif ent.label_ == 'ORG':
+                entities['BRAND'].append(ent.text)
+            elif ent.label_ == 'GPE':
+                entities['LOCATION'].append(ent.text)
+            elif ent.label_ == 'PERSON':
+                entities['PERSON'].append(ent.text)
+        entities_list.append(entities)
+    return entities_list
+
+# Step 4: Event Extraction (Batched)
+@st.cache_data
+def extract_events_batch(_texts):
+    """Extract events based on key verbs in batch"""
     event_verbs = ['compré', 'bought', 'devolví', 'returned', 'probé', 'tried', 'funcionó', 'worked', 'falló', 'failed']
-    events = []
-    doc = nlp(text)
-    
-    for token in doc:
-        if token.lemma_.lower() in event_verbs:
-            for chunk in doc.noun_chunks:
-                if chunk.root.head == token:
-                    event = {
-                        'verb': token.lemma_.lower(),
-                        'subject': None,
-                        'object': chunk.text
-                    }
-                    for child in token.children:
-                        if child.dep_ == 'nsubj':
-                            event['subject'] = child.text
-                    events.append(event)
-    
-    return events
+    events_list = []
+    for doc in nlp.pipe(_texts, disable=["ner"]):
+        events = []
+        for token in doc:
+            if token.lemma_.lower() in event_verbs:
+                for chunk in doc.noun_chunks:
+                    if chunk.root.head == token:
+                        event = {
+                            'verb': token.lemma_.lower(),
+                            'subject': None,
+                            'object': chunk.text
+                        }
+                        for child in token.children:
+                            if child.dep_ == 'nsubj':
+                                event['subject'] = child.text
+                        events.append(event)
+        events_list.append(events)
+    return events_list
 
-def extract_relations(text, entities):
-    """Extract relations between entities"""
-    relations = []
-    doc = nlp(text[:1000000])  # Limitar texto
-    
-    for sent in doc.sents:
-        if 'recommend' in sent.text.lower():
-            for person in entities.get('PERSON', []):
-                for product in entities.get('PRODUCT', []):
-                    relations.append((person, 'recommended', product))
-        if 'launch' in sent.text.lower():
-            for brand in entities.get('BRAND', []):
-                for product in entities.get('PRODUCT', []):
-                    relations.append((brand, 'launched', product))
-    
-    return relations
+# Step 5: Relation Extraction (Batched)
+@st.cache_data
+def extract_relations_batch(_texts, _entities_list):
+    """Extract relations between entities in batch"""
+    relations_list = []
+    for doc, entities in zip(nlp.pipe(_texts, disable=["ner", "lemmatizer"]), _entities_list):
+        relations = []
+        for sent in doc.sents:
+            if 'recommend' in sent.text.lower():
+                for person in entities.get('PERSON', []):
+                    for product in entities.get('PRODUCT', []):
+                        relations.append((person, 'recommended', product))
+            if 'launch' in sent.text.lower():
+                for brand in entities.get('BRAND', []):
+                    for product in entities.get('PRODUCT', []):
+                        relations.append((brand, 'launched', product))
+        relations_list.append(relations)
+    return relations_list
 
-def extract_emotions(text, rating):
+# Step 6: Emotion Extraction
+@st.cache_data
+def extract_emotions_batch(_texts, _ratings):
     """Extract emotions based on sentiment and keywords"""
     emotion_dict = {
         'positive': ['happy', 'great', 'awesome', 'love', 'excellent', 'fantastic'],
         'negative': ['disappointed', 'bad', 'poor', 'hate', 'terrible', 'frustrating'],
         'neutral': ['okay', 'average', 'fine']
     }
-    emotions = []
-    text = text.lower()
-    
-    if rating >= 4:
-        emotions.append('positive')
-    elif rating <= 2:
-        emotions.append('negative')
-    else:
-        emotions.append('neutral')
-    
-    for emotion, keywords in emotion_dict.items():
-        if any(keyword in text for keyword in keywords):
-            emotions.append(emotion)
-    
-    return list(set(emotions))
+    emotions_list = []
+    for text, rating in zip(_texts, _ratings):
+        emotions = []
+        text = text.lower()
+        if rating >= 4:
+            emotions.append('positive')
+        elif rating <= 2:
+            emotions.append('negative')
+        else:
+            emotions.append('neutral')
+        for emotion, keywords in emotion_dict.items():
+            if any(keyword in text for keyword in keywords):
+                emotions.append(emotion)
+        emotions_list.append(list(set(emotions)))
+    return emotions_list
 
+# Step 7: Knowledge Representation (RDF Triplets)
 def sanitize_uri_component(text):
     """Sanitize text to create valid URI components."""
     text = re.sub(r'[^\w\s-]', '', text)
     text = text.replace(' ', '_').strip('_')
     return text
 
-def create_rdf_triplets(df, entities_list, events_list, relations_list, emotions_list):
+@st.cache_data
+def create_rdf_triplets(_df, _entities_list, _events_list, _relations_list, _emotions_list):
     """Create RDF graph from entities, events, relations, and emotions."""
     g = Graph()
     namespace = "http://example.org/amazon_reviews#"
     
-    for idx, row in df.iterrows():
+    for idx, row in _df.iterrows():
         review_id = URIRef(f"{namespace}review_{idx}")
         product = row['name']
         sanitized_product = sanitize_uri_component(product)
@@ -281,7 +177,7 @@ def create_rdf_triplets(df, entities_list, events_list, relations_list, emotions
         g.add((product_uri, RDF.type, URIRef(f"{namespace}Product")))
         g.add((product_uri, RDFS.label, Literal(product)))
         
-        for entity_type, entities in entities_list[idx].items():
+        for entity_type, entities in _entities_list[idx].items():
             for entity in entities:
                 sanitized_entity = sanitize_uri_component(entity)
                 entity_uri = URIRef(f"{namespace}{entity_type.lower()}_{sanitized_entity}")
@@ -289,7 +185,7 @@ def create_rdf_triplets(df, entities_list, events_list, relations_list, emotions
                 g.add((entity_uri, RDFS.label, Literal(entity)))
                 g.add((review_id, URIRef(f"{namespace}mentions"), entity_uri))
         
-        for event in events_list[idx]:
+        for event in _events_list[idx]:
             event_uri = URIRef(f"{namespace}event_{idx}_{event['verb']}")
             g.add((event_uri, RDF.type, URIRef(f"{namespace}Event")))
             g.add((event_uri, URIRef(f"{namespace}verb"), Literal(event['verb'])))
@@ -300,7 +196,7 @@ def create_rdf_triplets(df, entities_list, events_list, relations_list, emotions
             sanitized_object = sanitize_uri_component(event['object'])
             g.add((event_uri, URIRef(f"{namespace}object"), URIRef(f"{namespace}product_{sanitized_object}")))
         
-        for relation in relations_list[idx]:
+        for relation in _relations_list[idx]:
             subject, predicate, obj = relation
             sanitized_subject = sanitize_uri_component(subject)
             sanitized_obj = sanitize_uri_component(obj)
@@ -308,7 +204,7 @@ def create_rdf_triplets(df, entities_list, events_list, relations_list, emotions
             obj_uri = URIRef(f"{namespace}{sanitized_obj}")
             g.add((subject_uri, URIRef(f"{namespace}{predicate}"), obj_uri))
         
-        for emotion in emotions_list[idx]:
+        for emotion in _emotions_list[idx]:
             emotion_uri = URIRef(f"{namespace}emotion_{emotion}")
             g.add((emotion_uri, RDF.type, URIRef(f"{namespace}Emotion")))
             g.add((emotion_uri, RDFS.label, Literal(emotion)))
@@ -319,64 +215,25 @@ def create_rdf_triplets(df, entities_list, events_list, relations_list, emotions
     
     return g
 
-# Funciones de búsqueda y visualización (mantener las originales)
+# Step 8: Semantic Web and Search with BM25 (Cached)
 @st.cache_data
-def perform_search(query, tokenized_docs, doc_names, raw_docs, emotions_list, _vocab):
-    """Realizar búsqueda con cache"""
-    bm25 = BM25Okapi(tokenized_docs)
+def initialize_bm25(_tokenized_docs, _doc_names):
+    """Initialize and cache BM25 model"""
+    return BM25Okapi(_tokenized_docs), _doc_names
+
+def bm25_search(query, bm25, tokenized_docs, doc_names):
+    """Perform BM25 search on tokenized documents"""
     tokenized_query = clean_words(query)
     scores = bm25.get_scores(tokenized_query)
     ranked = sorted(
         [(name, doc, score) for name, doc, score in zip(doc_names, tokenized_docs, scores) if score > 0],
         key=lambda x: x[2], reverse=True
     )
-    
-    # Cosine Similarity
-    doc_vectors = [vectorize(doc, _vocab) for doc in tokenized_docs]
-    query_vector = vectorize(tokenized_query, _vocab)
-    cosine_scores = [cosine_similarity(query_vector, doc_vector) for doc_vector in doc_vectors]
-    
-    # Combine scores
-    combined_ranked = []
-    for i, (name, doc, bm25_score) in enumerate(ranked):
-        cosine_score = cosine_scores[doc_names.index(name)]
-        combined_score = 0.7 * bm25_score + 0.3 * cosine_score
-        review_idx = doc_names.index(name)
-        combined_ranked.append((name, raw_docs[review_idx], combined_score, emotions_list[review_idx]))
-    
-    return sorted(combined_ranked, key=lambda x: x[2], reverse=True)[:10]
+    return ranked
 
-# Resto de funciones helper (mantener las originales)
-def tokenize(text):
-    return re.findall(r'\b\w+\b', text)
-
-def clean_words(text):
-    tokens = tokenize(normalize_text(text))
-    return [word for word in tokens if word not in stopwords_set and word.isalpha()]
-
-def normalize_text(text):
-    text = text.lower()
-    text = ''.join(c for c in unicodedata.normalize('NFD', text) if unicodedata.category(c) != 'Mn')
-    return text
-
-def cosine_similarity(vec1, vec2):
-    if not np.any(vec1) or not np.any(vec2):
-        return 0.0
-    return np.dot(vec1, vec2) / (np.linalg.norm(vec1) * np.linalg.norm(vec2))
-
-def vectorize(words, vocab):
-    return np.array([1 if word in words else 0 for word in vocab], dtype=int)
-
-def highlight_terms(text, query):
-    terms = set(clean_words(query))
-    for term in sorted(terms, key=len, reverse=True):
-        if term:
-            pattern = re.compile(rf'\b({re.escape(term)})\b', re.IGNORECASE)
-            text = pattern.sub(r'<mark>\1</mark>', text)
-    return text
-
+# Step 9: Entity Type Frequency Bar Chart
 def create_entity_type_bar_chart(rdf_graph, ranked_reviews):
-    """Create entity type frequency chart"""
+    """Create a bar chart showing the frequency of entity types in the RDF graph"""
     namespace = "http://example.org/amazon_reviews#"
     entity_counts = defaultdict(int)
     
@@ -385,25 +242,37 @@ def create_entity_type_bar_chart(rdf_graph, ranked_reviews):
             entity_type = str(o).split('#')[-1]
             entity_counts[entity_type] += 1
     
+    top_reviews = {name for name, _, _, _ in ranked_reviews[:5]}
+    highlighted_counts = defaultdict(int)
+    for idx, row in df.iterrows():
+        if f"Review_{idx+1}" in top_reviews:
+            for entity_type, entities in entities_list[idx].items():
+                highlighted_counts[entity_type] += len(entities)
+    
     entity_types = list(entity_counts.keys())
     counts = [entity_counts[et] for et in entity_types]
+    highlight_counts = [highlighted_counts.get(et, 0) for et in entity_types]
     
     df_plot = pd.DataFrame({
         'Entity Type': entity_types,
-        'Total Count': counts
+        'Total Count': counts,
+        'Highlighted Count (Top Reviews)': highlight_counts
     })
     
     fig = px.bar(
         df_plot,
         x='Entity Type',
-        y='Total Count',
-        title='Entity Type Frequency in Reviews'
+        y=['Total Count', 'Highlighted Count (Top Reviews)'],
+        barmode='group',
+        title='Entity Type Frequency in Reviews',
+        labels={'value': 'Count', 'variable': 'Count Type'}
     )
     fig.update_layout(xaxis_tickangle=45)
     return fig
 
+# Step 10: Product-Emotion Bar Chart
 def create_product_emotion_bar_chart(df, emotions_list, ranked_reviews):
-    """Create product emotion distribution chart"""
+    """Create a bar chart showing emotion counts per product for top-ranked reviews"""
     top_reviews = {name for name, _, _, _ in ranked_reviews[:10]}
     emotion_counts = defaultdict(lambda: defaultdict(int))
     
@@ -434,10 +303,46 @@ def create_product_emotion_bar_chart(df, emotions_list, ranked_reviews):
         y='Count',
         color='Emotion',
         barmode='group',
-        title='Emotion Distribution per Product (Top 10 Reviews)'
+        title='Emotion Distribution per Product (Top 10 Reviews)',
+        labels={'Count': 'Emotion Count'}
     )
     fig.update_layout(xaxis_tickangle=45)
     return fig
+
+# Helper functions
+def tokenize(text):
+    """Divide text into words using regex"""
+    return re.findall(r'\b\w+\b', text)
+
+def clean_words(text):
+    """Tokenize, normalize, and remove stopwords"""
+    tokens = tokenize(normalize_text(text))
+    return [word for word in tokens if word not in stopwords_set and word.isalpha()]
+
+def normalize_text(text):
+    """Convert text to lowercase and remove accents"""
+    text = text.lower()
+    text = ''.join(c for c in unicodedata.normalize('NFD', text) if unicodedata.category(c) != 'Mn')
+    return text
+
+def cosine_similarity(vec1, vec2):
+    """Calculate cosine similarity between two vectors"""
+    if not np.any(vec1) or not np.any(vec2):
+        return 0.0
+    return np.dot(vec1, vec2) / (np.linalg.norm(vec1) * np.linalg.norm(vec2))
+
+def vectorize(words, vocab):
+    """Convert list of words to binary vector based on vocabulary"""
+    return np.array([1 if word in words else 0 for word in vocab], dtype=int)
+
+def highlight_terms(text, query):
+    """Highlight query terms in text"""
+    terms = set(clean_words(query))
+    for term in sorted(terms, key=len, reverse=True):
+        if term:
+            pattern = re.compile(rf'\b({re.escape(term)})\b', re.IGNORECASE)
+            text = pattern.sub(r'<mark>\1</mark>', text)
+    return text
 
 # Streamlit UI
 st.sidebar.title("Enhanced Semantic Search Engine")
@@ -447,11 +352,6 @@ st.sidebar.markdown("Modelo algebraico + Web semántica")
 
 st.header('Amazon Reviews Semantic Search', divider='rainbow')
 
-# Opción para limitar dataset
-limit_dataset = st.sidebar.checkbox("Modo rápido (solo primeras 1000 filas)", value=False)
-if limit_dataset:
-    st.sidebar.warning("⚡ Modo rápido activado para testing")
-
 # Load dataset
 uploaded_file = st.file_uploader(
     "Upload the CSV dataset (7817_1.csv)",
@@ -460,119 +360,196 @@ uploaded_file = st.file_uploader(
 )
 
 if uploaded_file:
-    # Leer contenido del archivo y generar hash
-    file_content = uploaded_file.read()
-    file_hash = get_file_hash(file_content)
+    start_time = time.time()
     
-    # Mostrar información del archivo
-    st.info(f"📁 Archivo cargado: {uploaded_file.name} ({len(file_content)/1024/1024:.1f} MB)")
+    # Step 1: Load dataset
+    st.subheader("Step 1: Dataset Loading")
+    st.write("Loading the Amazon reviews dataset from the uploaded CSV file.")
+    df = load_csv_data(uploaded_file)
+    raw_docs = df['text_content'].tolist()
+    doc_names = [f"Review_{i+1}" for i in range(len(raw_docs))]
     
-    # Procesar datos con cache
-    with st.spinner("Procesando datos... (esto puede tomar un momento la primera vez)"):
-        processed_data = load_and_process_csv_data(file_content, file_hash)
+    with st.expander("View console output"):
+        step_one_output = ["1. Loading Amazon reviews dataset:"]
+        step_one_output.append(f"Total reviews: {len(raw_docs)}")
+        step_one_output.append(f"Sample review (first 50 chars): {raw_docs[0][:50]}...")
+        st.code("\n".join(step_one_output), language='plaintext')
+
+    # Step 2: Cleaning and Regex
+    st.subheader("Step 2: Cleaning and Regex Extraction")
+    st.write("Cleaning text, extracting prices and models using regex.")
+    cleaned_results = parallel_clean_texts(raw_docs)
+    cleaned_docs, prices_list, models_list = zip(*cleaned_results)
+    tokenized_docs = [clean_words(doc) for doc in cleaned_docs]
     
-    # Extraer datos procesados
-    df = processed_data['df']
-    raw_docs = processed_data['raw_docs']
-    doc_names = processed_data['doc_names']
-    tokenized_docs = processed_data['tokenized_docs']
-    entities_list = processed_data['entities_list']
-    events_list = processed_data['events_list']
-    relations_list = processed_data['relations_list']
-    emotions_list = processed_data['emotions_list']
-    rdf_graph = processed_data['rdf_graph']
-    vocab = processed_data['vocab']
+    with st.expander("View console output"):
+        step_two_output = ["2. Cleaning and extracting prices/models:"]
+        for i, (doc, prices, models) in enumerate(zip(cleaned_docs, prices_list, models_list), 1):
+            step_two_output.append(f"Review {i}: {len(doc.split())} words, Prices: {prices[:3]}, Models: {models[:3]}")
+        st.code("\n".join(step_two_output[:10]), language='plaintext')
+
+    # Step 3: NER
+    st.subheader("Step 3: Named Entity Recognition")
+    st.write("Extracting entities (PRODUCT, BRAND, LOCATION, PERSON) using spaCy.")
+    entities_list = extract_entities_batch(raw_docs)
     
-    # Mostrar estadísticas
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.metric("Total Reviews", len(raw_docs))
-    with col2:
-        st.metric("Vocabulary Size", len(vocab))
-    with col3:
-        st.metric("RDF Triplets", len(rdf_graph))
-    with col4:
-        st.metric("Entities Found", sum(len(e['PRODUCT']) + len(e['BRAND']) for e in entities_list))
+    with st.expander("View console output"):
+        step_three_output = ["3. Extracted entities:"]
+        for i, entities in enumerate(entities_list, 1):
+            step_three_output.append(f"Review {i}: {entities}")
+        st.code("\n".join(step_three_output[:10]), language='plaintext')
+
+    # Step 4: Event Extraction
+    st.subheader("Step 4: Event Extraction")
+    st.write("Extracting events based on key verbs (e.g., bought, failed).")
+    events_list = extract_events_batch(raw_docs)
     
-    # Búsqueda
-    st.subheader("🔍 Semantic Search")
-    search_query = st.text_input("Enter your search query", placeholder="e.g., kindle problems, great battery life, disappointing purchase")
+    with st.expander("View console output"):
+        step_four_output = ["4. Extracted events:"]
+        for i, events in enumerate(events_list, 1):
+            step_four_output.append(f"Review {i}: {events}")
+        st.code("\n".join(step_four_output[:10]), language='plaintext')
+
+    # Step 5: Relation Extraction
+    st.subheader("Step 5: Relation Extraction")
+    st.write("Extracting relations (e.g., PERSON recommended PRODUCT).")
+    relations_list = extract_relations_batch(raw_docs, entities_list)
+    
+    with st.expander("View console output"):
+        step_five_output = ["5. Extracted relations:"]
+        for i, relations in enumerate(relations_list, 1):
+            step_five_output.append(f"Review {i}: {relations}")
+        st.code("\n".join(step_five_output[:10]), language='plaintext')
+
+    # Step 6: Emotion Extraction
+    st.subheader("Step 6: Emotion Extraction")
+    st.write("Extracting emotions based on sentiment and keywords.")
+    emotions_list = extract_emotions_batch(raw_docs, df['reviews.rating'])
+    
+    with st.expander("View console output"):
+        step_six_output = ["6. Extracted emotions:"]
+        for i, emotions in enumerate(emotions_list, 1):
+            step_six_output.append(f"Review {i}: {emotions}")
+        st.code("\n".join(step_six_output[:10]), language='plaintext')
+
+    # Step 7: Knowledge Representation (RDF)
+    st.subheader("Step 7: Knowledge Representation")
+    st.write("Creating RDF triplets for entities, events, relations, and emotions.")
+    rdf_graph = create_rdf_triplets(df, entities_list, events_list, relations_list, emotions_list)
+    
+    with st.expander("View RDF triplets"):
+        step_seven_output = ["7. RDF Triplets:"]
+        for s, p, o in rdf_graph:
+            step_seven_output.append(f"({s}, {p}, {o})")
+        st.code("\n".join(step_seven_output[:10]) + "\n...", language='plaintext')
+
+    # Step 8: Semantic Search with BM25
+    st.subheader("Step 8: Semantic Search")
+    st.write("Performing search using BM25 ranking. Enter a query to search reviews.")
+    bm25, doc_names_cached = initialize_bm25(tokenized_docs, doc_names)
+    search_query = st.text_input("Enter your search query")
     
     if search_query:
-        # Realizar búsqueda
-        with st.spinner("Buscando..."):
-            combined_ranked = perform_search(search_query, tokenized_docs, doc_names, raw_docs, emotions_list, vocab)
+        # BM25 Search
+        ranked = bm25_search(search_query, bm25, tokenized_docs, doc_names_cached)
         
+        # Cosine Similarity
+        vocab = sorted(set(reduce(lambda x, y: x + y, tokenized_docs, clean_words(search_query))))
+        doc_vectors = [vectorize(doc, vocab) for doc in tokenized_docs]
+        query_vector = vectorize(clean_words(search_query), vocab)
+        cosine_scores = [cosine_similarity(query_vector, doc_vector) for doc_vector in doc_vectors]
+        
+        # Combine BM25 and Cosine scores
+        combined_ranked = []
+        for i, (name, doc, bm25_score) in enumerate(ranked):
+            cosine_score = cosine_scores[doc_names.index(name)]
+            combined_score = 0.7 * bm25_score + 0.3 * cosine_score
+            review_idx = doc_names.index(name)
+            combined_ranked.append((name, raw_docs[review_idx], combined_score, emotions_list[review_idx]))
+        
+        combined_ranked = sorted(combined_ranked, key=lambda x: x[2], reverse=True)[:10]
+        
+        with st.expander("View console output"):
+            step_eight_output = ["8. Search results (BM25 + Cosine, Top 10):"]
+            for rank, (name, doc, score, emotions) in enumerate(combined_ranked, 1):
+                step_eight_output.append(f"{rank}. {name} - Combined Score: {score:.4f}, Emotions: {emotions}")
+            st.code("\n".join(step_eight_output), language='plaintext')
+
+        # Step 9: Entity Type Frequency Bar Chart
+        st.subheader("Step 9: Entity Type Frequency")
+        st.write("Bar chart showing frequency of entity types (e.g., Product, Emotion) in reviews, with top-ranked reviews highlighted.")
+        entity_fig = create_entity_type_bar_chart(rdf_graph, combined_ranked)
+        st.plotly_chart(entity_fig, use_container_width=True)
+
+        # Step 10: Product-Emotion Bar Chart
+        st.subheader("Step 10: Product-Emotion Distribution")
+        st.write("Bar chart showing emotion counts per product for top 10 ranked reviews.")
+        emotion_fig = create_product_emotion_bar_chart(df, emotions_list, combined_ranked)
+        st.plotly_chart(emotion_fig, use_container_width=True)
+
+        # Search Results (Top 10)
+        st.subheader("Search Results (Top 10)")
         if combined_ranked:
-            # Mostrar resultados
-            st.subheader(f"📊 Search Results (Top {len(combined_ranked)})")
+            for rank, (name, doc, score, emotions) in enumerate(combined_ranked, 1):
+                st.write(f"{rank}. {name} - Combined Score: {score:.4f}, Emotions: {emotions}")
+                highlighted_doc = highlight_terms(doc, search_query)
+                with st.expander(f"View review content"):
+                    st.markdown(
+                        f'<div style="max-height: 200px; overflow-y: auto; background: #f9f9f9; padding: 8px; border-radius: 4px; white-space: pre-wrap;">{highlighted_doc}</div>',
+                        unsafe_allow_html=True
+                    )
             
-            # Tabs para diferentes vistas
-            tab1, tab2, tab3 = st.tabs(["🔍 Results", "📈 Analytics", "🔗 RDF Insights"])
-            
-            with tab1:
-                for rank, (name, doc, score, emotions) in enumerate(combined_ranked, 1):
-                    with st.expander(f"#{rank} {name} - Score: {score:.4f} | Emotions: {emotions}"):
-                        highlighted_doc = highlight_terms(doc[:1000] + "..." if len(doc) > 1000 else doc, search_query)
-                        st.markdown(highlighted_doc, unsafe_allow_html=True)
-            
-            with tab2:
-                col1, col2 = st.columns(2)
-                
-                with col1:
-                    # Score distribution
-                    df_scores = pd.DataFrame({
-                        "Review": [name for name, _, _, _ in combined_ranked],
-                        "Score": [score for _, _, score, _ in combined_ranked]
-                    })
-                    st.subheader("Score Distribution")
-                    st.bar_chart(df_scores.set_index("Review"))
-                
-                with col2:
-                    # Entity frequency chart
-                    entity_fig = create_entity_type_bar_chart(rdf_graph, combined_ranked)
-                    st.plotly_chart(entity_fig, use_container_width=True)
-                
-                # Product emotion chart
-                emotion_fig = create_product_emotion_bar_chart(df, emotions_list, combined_ranked)
-                st.plotly_chart(emotion_fig, use_container_width=True)
-            
-            with tab3:
-                st.subheader("RDF Triplets Sample")
-                triplets_sample = list(rdf_graph)[:20]  # Mostrar solo 20 triplets
-                for s, p, o in triplets_sample:
-                    st.code(f"({s}, {p}, {o})")
-                
-                if len(rdf_graph) > 20:
-                    st.info(f"Showing 20 of {len(rdf_graph)} total RDF triplets")
+            # Score Distribution
+            st.subheader("Score Distribution")
+            scores = [score for _, _, score, _ in combined_ranked]
+            labels = [name for name, _, _, _ in combined_ranked]
+            chart_data = {
+                "type": "bar",
+                "data": {
+                    "labels": labels,
+                    "datasets": [{
+                        "label": "Combined Score",
+                        "data": scores,
+                        "backgroundColor": "rgba(75, 192, 192, 0.6)",
+                        "borderColor": "rgba(75, 192, 192, 1)",
+                        "borderWidth": 1
+                    }]
+                },
+                "options": {
+                    "scales": {
+                        "y": {
+                            "beginAtZero": True,
+                            "title": {
+                                "display": True,
+                                "text": "Combined Score"
+                            }
+                        },
+                        "x": {
+                            "title": {
+                                "display": True,
+                                "text": "Review"
+                            }
+                        }
+                    },
+                    "plugins": {
+                        "legend": {
+                            "display": True
+                        },
+                        "title": {
+                            "display": True,
+                            "text": "Score Distribution for Top 10 Reviews"
+                        }
+                    }
+                }
+            }
+            st.json(chart_data)
         
         else:
-            st.warning("No se encontraron resultados relevantes. Intenta con otra consulta.")
+            st.info("No relevant reviews found. Try a different query.")
     
-    # Información adicional en sidebar
-    with st.sidebar:
-        st.subheader("💡 Tips for better search")
-        st.markdown("""
-        - Use specific product names (e.g., "kindle paperwhite")
-        - Include emotions (e.g., "disappointed", "love", "excellent")
-        - Try problem descriptions (e.g., "battery issues", "screen problems")
-        - Use purchase-related terms (e.g., "bought", "returned")
-        """)
-        
-        st.subheader("📊 Dataset Info")
-        if 'df' in locals():
-            st.write(f"Reviews processed: {len(df)}")
-            st.write(f"Average rating: {df['reviews.rating'].mean():.2f}")
-            st.write(f"Products: {df['name'].nunique()}")
+    # Display execution time
+    execution_time = time.time() - start_time
+    st.write(f"Total execution time: {execution_time:.2f} seconds")
 
 else:
-    st.info("📤 Upload the CSV dataset to begin the search.")
-    st.markdown("""
-    ### Features:
-    - **Smart Caching**: Data is processed once and cached for faster subsequent loads
-    - **Progress Tracking**: Real-time progress during processing
-    - **Batch Processing**: Optimized NLP processing in batches
-    - **Memory Efficient**: Reduced memory usage with optimized data structures
-    - **Fast Search**: BM25 + Cosine similarity with caching
-    - **Interactive UI**: Tabbed interface with analytics and insights
-    """)
+    st.info("Upload the CSV dataset to begin the search.")
