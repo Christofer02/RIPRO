@@ -3,7 +3,7 @@ pandas
 numpy
 nltk
 spacy==3.8.7
-en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3./en_core_web_sm-3.8.7-py3-none-any.whl
+en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl
 rank_bm25
 rdflib
 plotly
