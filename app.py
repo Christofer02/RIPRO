@@ -4,7 +4,6 @@ import re
 import numpy as np
 import pandas as pd
 import unicodedata
-import nltk
 from nltk.corpus import stopwords
 from nltk import download
 import spacy
@@ -14,11 +13,6 @@ from functools import reduce
 from collections import defaultdict
 import json
 import plotly.express as px
-from concurrent.futures import ProcessPoolExecutor
-import time
-
-# Descarga de recursos NLTK
-nltk.download('stopwords')
 
 # Download NLTK stopwords if not present
 download('stopwords')
@@ -33,15 +27,14 @@ except OSError:
     st.error("Please install the spaCy model by running: python -m spacy download en_core_web_sm")
     st.stop()
 
-# Step 1: Dataset loading (Cached)
-@st.cache_data
-def load_csv_data(_file):
+# Step 1: Dataset loading
+def load_csv_data(file_path):
     """Load and preprocess CSV data"""
-    df = pd.read_csv(_file)
+    df = pd.read_csv(file_path)
     df['text_content'] = df['reviews.text'].fillna('') + ' ' + df['reviews.title'].fillna('')
     return df
 
-# Step 2: Cleaning + Regex (Parallelized)
+# Step 2: Cleaning + Regex
 def clean_text(text):
     """Clean and normalize text, extract prices and models with regex"""
     if not isinstance(text, str):
@@ -61,99 +54,91 @@ def clean_text(text):
     
     return ' '.join(cleaned_tokens), prices, models
 
-@st.cache_data
-def parallel_clean_texts(_texts):
-    """Parallelize text cleaning"""
-    with ProcessPoolExecutor() as executor:
-        results = list(executor.map(clean_text, _texts))
-    return results
+# Step 3: Named Entity Recognition (NER)
+def extract_entities(text):
+    """Extract entities using spaCy"""
+    doc = nlp(text)
+    entities = {
+        'PRODUCT': [],
+        'BRAND': [],
+        'LOCATION': [],
+        'PERSON': []
+    }
+    for ent in doc.ents:
+        if ent.label_ == 'PRODUCT':
+            entities['PRODUCT'].append(ent.text)
+        elif ent.label_ == 'ORG':
+            entities['BRAND'].append(ent.text)
+        elif ent.label_ == 'GPE':
+            entities['LOCATION'].append(ent.text)
+        elif ent.label_ == 'PERSON':
+            entities['PERSON'].append(ent.text)
+    return entities
 
-# Step 3: Named Entity Recognition (NER) (Batched)
-@st.cache_data
-def extract_entities_batch(_texts):
-    """Extract entities using spaCy in batch"""
-    entities_list = []
-    for doc in nlp.pipe(_texts, disable=["parser", "lemmatizer"]):
-        entities = {'PRODUCT': [], 'BRAND': [], 'LOCATION': [], 'PERSON': []}
-        for ent in doc.ents:
-            if ent.label_ == 'PRODUCT':
-                entities['PRODUCT'].append(ent.text)
-            elif ent.label_ == 'ORG':
-                entities['BRAND'].append(ent.text)
-            elif ent.label_ == 'GPE':
-                entities['LOCATION'].append(ent.text)
-            elif ent.label_ == 'PERSON':
-                entities['PERSON'].append(ent.text)
-        entities_list.append(entities)
-    return entities_list
-
-# Step 4: Event Extraction (Batched)
-@st.cache_data
-def extract_events_batch(_texts):
-    """Extract events based on key verbs in batch"""
+# Step 4: Event Extraction
+def extract_events(text):
+    """Extract events based on key verbs"""
     event_verbs = ['compré', 'bought', 'devolví', 'returned', 'probé', 'tried', 'funcionó', 'worked', 'falló', 'failed']
-    events_list = []
-    for doc in nlp.pipe(_texts, disable=["ner"]):
-        events = []
-        for token in doc:
-            if token.lemma_.lower() in event_verbs:
-                for chunk in doc.noun_chunks:
-                    if chunk.root.head == token:
-                        event = {
-                            'verb': token.lemma_.lower(),
-                            'subject': None,
-                            'object': chunk.text
-                        }
-                        for child in token.children:
-                            if child.dep_ == 'nsubj':
-                                event['subject'] = child.text
-                        events.append(event)
-        events_list.append(events)
-    return events_list
+    events = []
+    doc = nlp(text)
+    
+    for token in doc:
+        if token.lemma_.lower() in event_verbs:
+            for chunk in doc.noun_chunks:
+                if chunk.root.head == token:
+                    event = {
+                        'verb': token.lemma_.lower(),
+                        'subject': None,
+                        'object': chunk.text
+                    }
+                    for child in token.children:
+                        if child.dep_ == 'nsubj':
+                            event['subject'] = child.text
+                    events.append(event)
+    
+    return events
 
-# Step 5: Relation Extraction (Batched)
-@st.cache_data
-def extract_relations_batch(_texts, _entities_list):
-    """Extract relations between entities in batch"""
-    relations_list = []
-    for doc, entities in zip(nlp.pipe(_texts, disable=["ner", "lemmatizer"]), _entities_list):
-        relations = []
-        for sent in doc.sents:
-            if 'recommend' in sent.text.lower():
-                for person in entities.get('PERSON', []):
-                    for product in entities.get('PRODUCT', []):
-                        relations.append((person, 'recommended', product))
-            if 'launch' in sent.text.lower():
-                for brand in entities.get('BRAND', []):
-                    for product in entities.get('PRODUCT', []):
-                        relations.append((brand, 'launched', product))
-        relations_list.append(relations)
-    return relations_list
+# Step 5: Relation Extraction
+def extract_relations(text, entities):
+    """Extract relations between entities"""
+    relations = []
+    doc = nlp(text)
+    
+    for sent in doc.sents:
+        if 'recommend' in sent.text.lower():
+            for person in entities.get('PERSON', []):
+                for product in entities.get('PRODUCT', []):
+                    relations.append((person, 'recommended', product))
+        if 'launch' in sent.text.lower():
+            for brand in entities.get('BRAND', []):
+                for product in entities.get('PRODUCT', []):
+                    relations.append((brand, 'launched', product))
+    
+    return relations
 
 # Step 6: Emotion Extraction
-@st.cache_data
-def extract_emotions_batch(_texts, _ratings):
+def extract_emotions(text, rating):
     """Extract emotions based on sentiment and keywords"""
     emotion_dict = {
         'positive': ['happy', 'great', 'awesome', 'love', 'excellent', 'fantastic'],
         'negative': ['disappointed', 'bad', 'poor', 'hate', 'terrible', 'frustrating'],
         'neutral': ['okay', 'average', 'fine']
     }
-    emotions_list = []
-    for text, rating in zip(_texts, _ratings):
-        emotions = []
-        text = text.lower()
-        if rating >= 4:
-            emotions.append('positive')
-        elif rating <= 2:
-            emotions.append('negative')
-        else:
-            emotions.append('neutral')
-        for emotion, keywords in emotion_dict.items():
-            if any(keyword in text for keyword in keywords):
-                emotions.append(emotion)
-        emotions_list.append(list(set(emotions)))
-    return emotions_list
+    emotions = []
+    text = text.lower()
+    
+    if rating >= 4:
+        emotions.append('positive')
+    elif rating <= 2:
+        emotions.append('negative')
+    else:
+        emotions.append('neutral')
+    
+    for emotion, keywords in emotion_dict.items():
+        if any(keyword in text for keyword in keywords):
+            emotions.append(emotion)
+    
+    return list(set(emotions))
 
 # Step 7: Knowledge Representation (RDF Triplets)
 def sanitize_uri_component(text):
@@ -162,13 +147,12 @@ def sanitize_uri_component(text):
     text = text.replace(' ', '_').strip('_')
     return text
 
-@st.cache_data
-def create_rdf_triplets(_df, _entities_list, _events_list, _relations_list, _emotions_list):
+def create_rdf_triplets(df, entities_list, events_list, relations_list, emotions_list):
     """Create RDF graph from entities, events, relations, and emotions."""
     g = Graph()
     namespace = "http://example.org/amazon_reviews#"
     
-    for idx, row in _df.iterrows():
+    for idx, row in df.iterrows():
         review_id = URIRef(f"{namespace}review_{idx}")
         product = row['name']
         sanitized_product = sanitize_uri_component(product)
@@ -177,7 +161,7 @@ def create_rdf_triplets(_df, _entities_list, _events_list, _relations_list, _emo
         g.add((product_uri, RDF.type, URIRef(f"{namespace}Product")))
         g.add((product_uri, RDFS.label, Literal(product)))
         
-        for entity_type, entities in _entities_list[idx].items():
+        for entity_type, entities in entities_list[idx].items():
             for entity in entities:
                 sanitized_entity = sanitize_uri_component(entity)
                 entity_uri = URIRef(f"{namespace}{entity_type.lower()}_{sanitized_entity}")
@@ -185,7 +169,7 @@ def create_rdf_triplets(_df, _entities_list, _events_list, _relations_list, _emo
                 g.add((entity_uri, RDFS.label, Literal(entity)))
                 g.add((review_id, URIRef(f"{namespace}mentions"), entity_uri))
         
-        for event in _events_list[idx]:
+        for event in events_list[idx]:
             event_uri = URIRef(f"{namespace}event_{idx}_{event['verb']}")
             g.add((event_uri, RDF.type, URIRef(f"{namespace}Event")))
             g.add((event_uri, URIRef(f"{namespace}verb"), Literal(event['verb'])))
@@ -196,7 +180,7 @@ def create_rdf_triplets(_df, _entities_list, _events_list, _relations_list, _emo
             sanitized_object = sanitize_uri_component(event['object'])
             g.add((event_uri, URIRef(f"{namespace}object"), URIRef(f"{namespace}product_{sanitized_object}")))
         
-        for relation in _relations_list[idx]:
+        for relation in relations_list[idx]:
             subject, predicate, obj = relation
             sanitized_subject = sanitize_uri_component(subject)
             sanitized_obj = sanitize_uri_component(obj)
@@ -204,7 +188,7 @@ def create_rdf_triplets(_df, _entities_list, _events_list, _relations_list, _emo
             obj_uri = URIRef(f"{namespace}{sanitized_obj}")
             g.add((subject_uri, URIRef(f"{namespace}{predicate}"), obj_uri))
         
-        for emotion in _emotions_list[idx]:
+        for emotion in emotions_list[idx]:
             emotion_uri = URIRef(f"{namespace}emotion_{emotion}")
             g.add((emotion_uri, RDF.type, URIRef(f"{namespace}Emotion")))
             g.add((emotion_uri, RDFS.label, Literal(emotion)))
@@ -215,14 +199,10 @@ def create_rdf_triplets(_df, _entities_list, _events_list, _relations_list, _emo
     
     return g
 
-# Step 8: Semantic Web and Search with BM25 (Cached)
-@st.cache_data
-def initialize_bm25(_tokenized_docs, _doc_names):
-    """Initialize and cache BM25 model"""
-    return BM25Okapi(_tokenized_docs), _doc_names
-
-def bm25_search(query, bm25, tokenized_docs, doc_names):
+# Step 8: Semantic Web and Search with BM25
+def bm25_search(query, tokenized_docs, doc_names):
     """Perform BM25 search on tokenized documents"""
+    bm25 = BM25Okapi(tokenized_docs)
     tokenized_query = clean_words(query)
     scores = bm25.get_scores(tokenized_query)
     ranked = sorted(
@@ -237,18 +217,21 @@ def create_entity_type_bar_chart(rdf_graph, ranked_reviews):
     namespace = "http://example.org/amazon_reviews#"
     entity_counts = defaultdict(int)
     
+    # Count entity types
     for s, p, o in rdf_graph:
         if str(p).endswith('type'):
             entity_type = str(o).split('#')[-1]
             entity_counts[entity_type] += 1
     
-    top_reviews = {name for name, _, _, _ in ranked_reviews[:5]}
+    # Highlight top-ranked reviews
+    top_reviews = {name for name, _, _, _ in ranked_reviews[:5]}  # Updated to unpack 4 elements
     highlighted_counts = defaultdict(int)
     for idx, row in df.iterrows():
         if f"Review_{idx+1}" in top_reviews:
             for entity_type, entities in entities_list[idx].items():
                 highlighted_counts[entity_type] += len(entities)
     
+    # Prepare data for bar chart
     entity_types = list(entity_counts.keys())
     counts = [entity_counts[et] for et in entity_types]
     highlight_counts = [highlighted_counts.get(et, 0) for et in entity_types]
@@ -273,7 +256,7 @@ def create_entity_type_bar_chart(rdf_graph, ranked_reviews):
 # Step 10: Product-Emotion Bar Chart
 def create_product_emotion_bar_chart(df, emotions_list, ranked_reviews):
     """Create a bar chart showing emotion counts per product for top-ranked reviews"""
-    top_reviews = {name for name, _, _, _ in ranked_reviews[:10]}
+    top_reviews = {name for name, _, _, _ in ranked_reviews[:10]}  # Updated to unpack 4 elements
     emotion_counts = defaultdict(lambda: defaultdict(int))
     
     for idx, row in df.iterrows():
@@ -282,6 +265,7 @@ def create_product_emotion_bar_chart(df, emotions_list, ranked_reviews):
             for emotion in emotions_list[idx]:
                 emotion_counts[product][emotion] += 1
     
+    # Prepare data for bar chart
     products = []
     emotions = []
     counts = []
@@ -360,8 +344,6 @@ uploaded_file = st.file_uploader(
 )
 
 if uploaded_file:
-    start_time = time.time()
-    
     # Step 1: Load dataset
     st.subheader("Step 1: Dataset Loading")
     st.write("Loading the Amazon reviews dataset from the uploaded CSV file.")
@@ -377,60 +359,67 @@ if uploaded_file:
 
     # Step 2: Cleaning and Regex
     st.subheader("Step 2: Cleaning and Regex Extraction")
-    st.write("Cleaning text, extracting prices and models using regex.")
-    cleaned_results = parallel_clean_texts(raw_docs)
-    cleaned_docs, prices_list, models_list = zip(*cleaned_results)
+    st.write("Cleaning text, extracting prices and product models using regex.")
+    cleaned_docs = []
+    prices_list = []
+    models_list = []
+    for doc in raw_docs:
+        cleaned, prices, models = clean_text(doc)
+        cleaned_docs.append(cleaned)
+        prices_list.append(prices)
+        models_list.append(models)
+    
     tokenized_docs = [clean_words(doc) for doc in cleaned_docs]
     
     with st.expander("View console output"):
         step_two_output = ["2. Cleaning and extracting prices/models:"]
         for i, (doc, prices, models) in enumerate(zip(cleaned_docs, prices_list, models_list), 1):
             step_two_output.append(f"Review {i}: {len(doc.split())} words, Prices: {prices[:3]}, Models: {models[:3]}")
-        st.code("\n".join(step_two_output[:10]), language='plaintext')
+        st.code("\n".join(step_two_output), language='plaintext')
 
     # Step 3: NER
     st.subheader("Step 3: Named Entity Recognition")
     st.write("Extracting entities (PRODUCT, BRAND, LOCATION, PERSON) using spaCy.")
-    entities_list = extract_entities_batch(raw_docs)
+    entities_list = [extract_entities(doc) for doc in raw_docs]
     
     with st.expander("View console output"):
         step_three_output = ["3. Extracted entities:"]
         for i, entities in enumerate(entities_list, 1):
             step_three_output.append(f"Review {i}: {entities}")
-        st.code("\n".join(step_three_output[:10]), language='plaintext')
+        st.code("\n".join(step_three_output), language='plaintext')
 
     # Step 4: Event Extraction
     st.subheader("Step 4: Event Extraction")
     st.write("Extracting events based on key verbs (e.g., bought, failed).")
-    events_list = extract_events_batch(raw_docs)
+    events_list = [extract_events(doc) for doc in raw_docs]
     
     with st.expander("View console output"):
         step_four_output = ["4. Extracted events:"]
         for i, events in enumerate(events_list, 1):
             step_four_output.append(f"Review {i}: {events}")
-        st.code("\n".join(step_four_output[:10]), language='plaintext')
+        st.code("\n".join(step_four_output), language='plaintext')
 
     # Step 5: Relation Extraction
     st.subheader("Step 5: Relation Extraction")
     st.write("Extracting relations (e.g., PERSON recommended PRODUCT).")
-    relations_list = extract_relations_batch(raw_docs, entities_list)
+    relations_list = [extract_relations(doc, entities) for doc, entities in zip(raw_docs, entities_list)]
     
     with st.expander("View console output"):
         step_five_output = ["5. Extracted relations:"]
         for i, relations in enumerate(relations_list, 1):
             step_five_output.append(f"Review {i}: {relations}")
-        st.code("\n".join(step_five_output[:10]), language='plaintext')
+        st.code("\n".join(step_five_output), language='plaintext')
 
     # Step 6: Emotion Extraction
     st.subheader("Step 6: Emotion Extraction")
     st.write("Extracting emotions based on sentiment and keywords.")
-    emotions_list = extract_emotions_batch(raw_docs, df['reviews.rating'])
+    emotions_list = [extract_emotions(doc, row[1]['reviews.rating']) for row, doc in zip(df.iterrows(), raw_docs)]
     
     with st.expander("View console output"):
         step_six_output = ["6. Extracted emotions:"]
         for i, emotions in enumerate(emotions_list, 1):
             step_six_output.append(f"Review {i}: {emotions}")
-        st.code("\n".join(step_six_output[:10]), language='plaintext')
+        st.code("\n".join(step_six_output), language='plaintext')
 
     # Step 7: Knowledge Representation (RDF)
     st.subheader("Step 7: Knowledge Representation")
@@ -446,12 +435,11 @@ if uploaded_file:
     # Step 8: Semantic Search with BM25
     st.subheader("Step 8: Semantic Search")
     st.write("Performing search using BM25 ranking. Enter a query to search reviews.")
-    bm25, doc_names_cached = initialize_bm25(tokenized_docs, doc_names)
     search_query = st.text_input("Enter your search query")
     
     if search_query:
         # BM25 Search
-        ranked = bm25_search(search_query, bm25, tokenized_docs, doc_names_cached)
+        ranked = bm25_search(search_query, tokenized_docs, doc_names)
         
         # Cosine Similarity
         vocab = sorted(set(reduce(lambda x, y: x + y, tokenized_docs, clean_words(search_query))))
@@ -467,7 +455,7 @@ if uploaded_file:
             review_idx = doc_names.index(name)
             combined_ranked.append((name, raw_docs[review_idx], combined_score, emotions_list[review_idx]))
         
-        combined_ranked = sorted(combined_ranked, key=lambda x: x[2], reverse=True)[:10]
+        combined_ranked = sorted(combined_ranked, key=lambda x: x[2], reverse=True)[:10]  # Limit to top 10
         
         with st.expander("View console output"):
             step_eight_output = ["8. Search results (BM25 + Cosine, Top 10):"]
@@ -500,56 +488,16 @@ if uploaded_file:
                     )
             
             # Score Distribution
+            df_sim = pd.DataFrame({
+                "Review": [name for name, _, _, _ in combined_ranked],
+                "Combined Score": [score for _, _, score, _ in combined_ranked]
+            })
+            df_sim["Review"] = pd.Categorical(df_sim["Review"], categories=df_sim["Review"], ordered=True)
+            df_sim = df_sim.set_index("Review")
+            
             st.subheader("Score Distribution")
-            scores = [score for _, _, score, _ in combined_ranked]
-            labels = [name for name, _, _, _ in combined_ranked]
-            chart_data = {
-                "type": "bar",
-                "data": {
-                    "labels": labels,
-                    "datasets": [{
-                        "label": "Combined Score",
-                        "data": scores,
-                        "backgroundColor": "rgba(75, 192, 192, 0.6)",
-                        "borderColor": "rgba(75, 192, 192, 1)",
-                        "borderWidth": 1
-                    }]
-                },
-                "options": {
-                    "scales": {
-                        "y": {
-                            "beginAtZero": True,
-                            "title": {
-                                "display": True,
-                                "text": "Combined Score"
-                            }
-                        },
-                        "x": {
-                            "title": {
-                                "display": True,
-                                "text": "Review"
-                            }
-                        }
-                    },
-                    "plugins": {
-                        "legend": {
-                            "display": True
-                        },
-                        "title": {
-                            "display": True,
-                            "text": "Score Distribution for Top 10 Reviews"
-                        }
-                    }
-                }
-            }
-            st.json(chart_data)
-        
+            st.bar_chart(df_sim)
         else:
             st.info("No relevant reviews found. Try a different query.")
-    
-    # Display execution time
-    execution_time = time.time() - start_time
-    st.write(f"Total execution time: {execution_time:.2f} seconds")
-
 else:
     st.info("Upload the CSV dataset to begin the search.")
