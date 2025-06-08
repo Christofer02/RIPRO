@@ -1,0 +1,8 @@
+streamlit
+pandas
+numpy
+nltk
+spacy
+rank_bm25
+rdflib
+plotly
