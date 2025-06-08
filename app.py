@@ -14,23 +14,13 @@ from functools import reduce
 from collections import defaultdict
 import json
 import plotly.express as px
-import importlib.util
-
-# Verifica si el modelo está disponible, si no, lanza un mensaje de error
-if importlib.util.find_spec("en_core_web_sm") is None:
-    raise ImportError("El modelo 'en_core_web_sm' no está instalado. Verifica tu requirements.txt.")
-else:
-    nlp = spacy.load("en_core_web_sm")
 
 # Descarga de recursos NLTK
 nltk.download('stopwords')
 
 # Carga automática del modelo de spaCy
-try:
-    nlp = spacy.load("en_core_web_sm")
-except:
-    os.system("python -m spacy download en_core_web_sm")
-    nlp = spacy.load("en_core_web_sm")
+
+nlp = spacy.load("en_core_web_sm")
 
 # Download NLTK stopwords if not present
 download('stopwords')
