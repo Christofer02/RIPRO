@@ -8,3 +8,4 @@ rank_bm25
 rdflib
 plotly
 langdetect
+scipy
