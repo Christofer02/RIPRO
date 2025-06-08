@@ -126,10 +126,14 @@ def extract_events_batch(texts, cache_file="events_cache.json"):
 
 # Step 5: Relation Extraction
 def extract_relations_batch(texts, entities_list, cache_file="relations_cache.json"):
-    """Extract relations between entities in batch mode."""
+    """Extract relations between entities in batch mode with sentencizer."""
     if os.path.exists(cache_file):
         with open(cache_file, 'r') as f:
             return json.load(f)
+    
+    # Add sentencizer to the pipeline if not already present
+    if 'sentencizer' not in nlp.pipe_names:
+        nlp.add_pipe('sentencizer', before='ner')
     
     relations_list = []
     for doc, entities in zip(nlp.pipe(texts, disable=["lemmatizer", "parser"]), entities_list):
@@ -485,18 +489,16 @@ if uploaded_file:
     progress_bar.progress(step / steps)
     
     # Step 5: Relation Extraction
+    # Step 5: Relation Extraction
     st.subheader("Step 5: Relation Extraction")
     st.write("Extracting relations (e.g., PERSON recommended PRODUCT).")
     relations_list = extract_relations_batch(raw_docs, entities_list)
-    
+
     with st.expander("View console output"):
         step_five_output = ["5. Extracted relations:"]
         for i, relations in enumerate(relations_list, 1):
-            step_five_output.append(f"Review {i}: {relations}")
+                step_five_output.append(f"Review {i}: {relations}")
         st.code("\n".join(step_five_output[:10]), language='plaintext')
-    
-    step += 1
-    progress_bar.progress(step / steps)
     
     # Step 6: Emotion Extraction
     st.subheader("Step 6: Emotion Extraction")
