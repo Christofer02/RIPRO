@@ -185,7 +185,7 @@ def create_rdf_triplets(df, entities_list, events_list, relations_list, emotions
             sanitized_subject = sanitize_uri_component(subject)
             sanitized_obj = sanitize_uri_component(obj)
             subject_uri = URIRef(f"{namespace}{sanitized_subject}")
-            obj_uri = URIRef(f"{namespace}{sanitized_obj}")
+            obj_uri = URIRef(f"{namespace}{s-sanized_obj}")
             g.add((subject_uri, URIRef(f"{namespace}{predicate}"), obj_uri))
         
         for emotion in emotions_list[idx]:
@@ -478,8 +478,48 @@ if uploaded_file:
         # Search Results (Top 10)
         st.subheader("Search Results (Top 10)")
         if combined_ranked:
+            # Prepare data for the table
+            results_data = []
             for rank, (name, doc, score, emotions) in enumerate(combined_ranked, 1):
-                st.write(f"{rank}. {name} - Combined Score: {score:.4f}, Emotions: {emotions}")
+                # Extract review index from name (e.g., "Review_1" -> 0)
+                review_idx = int(name.split('_')[1]) - 1
+                # Get review date
+                review_date = pd.to_datetime(df.iloc[review_idx]['reviews.date']).strftime('%Y-%m-%d') if pd.notna(df.iloc[review_idx]['reviews.date']) else 'Unknown'
+                # Determine sentiment
+                rating = df.iloc[review_idx]['reviews.rating']
+                sentiment = 'Positive' if rating >= 4 else 'Negative' if rating <= 2 else 'Neutral'
+                # Append to results
+                results_data.append({
+                    'Review ID': name,
+                    'Date': review_date,
+                    'Review Text': doc[:200] + '...' if len(doc) > 200 else doc,  # Truncate for display
+                    'Sentiment': sentiment
+                })
+            
+            # Create DataFrame for table
+            results_df = pd.DataFrame(results_data)
+            
+            # Display table
+            st.write("### Reviews Table")
+            st.dataframe(
+                results_df,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Review Text": st.column_config.TextColumn(
+                        "Review Text",
+                        width="large",
+                    )
+                }
+            )
+            
+            # Display detailed results with expandable content
+            st.write("### Detailed Results")
+            for rank, (name, doc, score, emotions) in enumerate(combined_ranked, 1):
+                review_idx = int(name.split('_')[1]) - 1
+                rating = df.iloc[review_idx]['reviews.rating']
+                sentiment = 'Positive' if rating >= 4 else 'Negative' if rating <= 2 else 'Neutral'
+                st.write(f"{rank}. {name} - Combined Score: {score:.4f}, Emotions: {emotions}, Sentiment: {sentiment}")
                 highlighted_doc = highlight_terms(doc, search_query)
                 with st.expander(f"View review content"):
                     st.markdown(
@@ -498,6 +538,6 @@ if uploaded_file:
             st.subheader("Score Distribution")
             st.bar_chart(df_sim)
         else:
-            st.info("No relevant reviews found. Try a different query.")
+            st.info("No relevant reviewes found. Try a different query.")
 else:
     st.info("Upload the CSV dataset to begin the search.")
